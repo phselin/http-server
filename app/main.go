@@ -1,11 +1,19 @@
 package main
 
 import (
+	"flag"
 	"fmt"
 	"net"
 	"os"
 	"strings"
 )
+
+const port = 4221
+const maxReadBytes = 1024
+const statusOK = "HTTP/1.1 200 OK"
+const statusNotFound = "HTTP/1.1 404 Not Found"
+
+var dirPath *string
 
 func getReqTarget(req string) string {
 	reqLine := strings.Split(req, "\r\n")[0]
@@ -49,9 +57,25 @@ func readRequest(conn net.Conn) (reqTarget string, headers map[string]string, er
 	return reqTarget, headers, nil
 }
 
+func readFileIntoBuf(filename string) []byte {
+	if dirPath == nil {
+		return fmt.Appendf(nil, "%s\r\n\r\n", statusNotFound)
+	}
+	filePath := fmt.Sprintf("%s/%s", *dirPath, filename)
+	_, err := os.Stat(filePath)
+	if err != nil {
+		return fmt.Appendf(nil, "%s\r\n\r\n", statusNotFound)
+	}
+	content, err := os.ReadFile(filePath)
+	if err != nil {
+		return fmt.Appendf(nil, "%s\r\n\r\n", statusNotFound)
+	}
+	return fmt.Appendf(nil, "%s\r\nContent-Type: application/octet-stream\r\nContent-Length: %d\r\n\r\n%s", statusOK, len(content), string(content))
+}
+
 func createResponse(reqTarget string, headers map[string]string) (buf []byte) {
 	if !strings.HasPrefix(reqTarget, "/") {
-		buf = []byte("HTTP/1.1 404 Not Found\r\n\r\n")
+		buf = fmt.Appendf(nil, "%s\r\n\r\n", statusNotFound)
 	}
 
 	pathParts := strings.Split(reqTarget, "/")[1:]
@@ -59,6 +83,8 @@ func createResponse(reqTarget string, headers map[string]string) (buf []byte) {
 		buf = createStrLenPlainTxtResp(pathParts[1])
 	} else if pathParts[0] == "user-agent" {
 		buf = createStrLenPlainTxtResp(headers["User-Agent"])
+	} else if len(pathParts) >= 2 && pathParts[0] == "files" {
+		buf = readFileIntoBuf(pathParts[1])
 	} else {
 		buf = fmt.Appendf(nil, "%s\r\n\r\n", statusOK)
 	}
@@ -76,11 +102,10 @@ func handleConn(conn net.Conn) {
 	sendResponse(conn, writeBuf)
 }
 
-const port = 4221
-const maxReadBytes = 1024
-const statusOK = "HTTP/1.1 200 OK"
-
 func main() {
+
+	dirPath = flag.String("directory", ".", "root directory for file requests")
+	flag.Parse()
 
 	l, err := net.Listen("tcp", fmt.Sprintf("0.0.0.0:%d", port))
 	if err != nil {
