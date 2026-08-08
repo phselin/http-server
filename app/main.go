@@ -24,7 +24,7 @@ func getHeaders(req string) map[string]string {
 }
 
 func createStrLenPlainTxtResp(s string) []byte {
-	return fmt.Appendf(nil, "HTTP/1.1 200 OK\r\n"+"Content-Type: text/plain\r\n"+"Content-Length: %d\r\n\r\n%s", len(s), s)
+	return fmt.Appendf(nil, "%s\r\n"+"Content-Type: text/plain\r\n"+"Content-Length: %d\r\n\r\n%s", statusOK, len(s), s)
 }
 
 func sendResponse(conn net.Conn, buf []byte) {
@@ -35,8 +35,50 @@ func sendResponse(conn net.Conn, buf []byte) {
 	}
 }
 
+func readRequest(conn net.Conn) (reqTarget string, headers map[string]string, err error) {
+	readBuf := make([]byte, maxReadBytes)
+	n, err := conn.Read(readBuf)
+	if err != nil {
+		fmt.Println("Error reading connection: ", err.Error())
+		return "", nil, err
+	}
+	readBuf = readBuf[:n]
+	req := string(readBuf)
+	reqTarget = getReqTarget(req)
+	headers = getHeaders(req)
+	return reqTarget, headers, nil
+}
+
+func createResponse(reqTarget string, headers map[string]string) (buf []byte) {
+	if !strings.HasPrefix(reqTarget, "/") {
+		buf = []byte("HTTP/1.1 404 Not Found\r\n\r\n")
+	}
+
+	pathParts := strings.Split(reqTarget, "/")[1:]
+	if len(pathParts) >= 2 && pathParts[0] == "echo" {
+		buf = createStrLenPlainTxtResp(pathParts[1])
+	} else if pathParts[0] == "user-agent" {
+		buf = createStrLenPlainTxtResp(headers["User-Agent"])
+	} else {
+		buf = fmt.Appendf(nil, "%s\r\n\r\n", statusOK)
+	}
+	return buf
+}
+
+func handleConn(conn net.Conn) {
+	reqTarget, headers, err := readRequest(conn)
+	if err != nil {
+		return
+	}
+
+	writeBuf := createResponse(reqTarget, headers)
+
+	sendResponse(conn, writeBuf)
+}
+
 const port = 4221
 const maxReadBytes = 1024
+const statusOK = "HTTP/1.1 200 OK"
 
 func main() {
 
@@ -46,31 +88,13 @@ func main() {
 		os.Exit(1)
 	}
 
-	conn, err := l.Accept()
-	if err != nil {
-		fmt.Println("Error accepting connection: ", err.Error())
-		os.Exit(1)
+	for {
+		conn, err := l.Accept()
+		if err != nil {
+			fmt.Println("Error accepting connection: ", err.Error())
+			os.Exit(1)
+		}
+		go handleConn(conn)
 	}
 
-	buf := make([]byte, maxReadBytes)
-	n, err := conn.Read(buf)
-	buf = buf[:n]
-	req := string(buf)
-	reqTarget := getReqTarget(req)
-	headers := getHeaders(req)
-	if reqTarget != "/" {
-		buf = []byte("HTTP/1.1 404 Not Found\r\n\r\n")
-	}
-
-	pathParts := strings.Split(reqTarget, "/")[1:]
-	if len(pathParts) >= 2 && pathParts[0] == "echo" {
-		s := pathParts[1]
-		buf = createStrLenPlainTxtResp(s)
-	} else if pathParts[0] == "user-agent" {
-		buf = createStrLenPlainTxtResp(headers["User-Agent"])
-	} else {
-		buf = []byte("HTTP/1.1 200 OK\r\n\r\n")
-	}
-
-	sendResponse(conn, buf)
 }
