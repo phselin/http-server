@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"flag"
 	"fmt"
 	"net"
@@ -15,92 +16,40 @@ const statusNotFound = "HTTP/1.1 404 Not Found"
 
 var dirPath *string
 
-func getReqTarget(req string) string {
-	reqLine := strings.Split(req, "\r\n")[0]
-	return strings.Fields(reqLine)[1]
-}
+type Method string
 
-func getHeaders(req string) map[string]string {
-	headers := strings.Split(req, "\r\n")
-	headers = headers[1 : len(headers)-2]
-	headerMap := make(map[string]string)
-	for _, header := range headers {
-		headerArr := strings.Split(header, ":")
-		headerMap[headerArr[0]] = strings.TrimSpace(headerArr[1])
-	}
-	return headerMap
-}
+const (
+	GET  Method = "GET"
+	POST Method = "POST"
+	// PUT, DELETE
+)
 
-func createStrLenPlainTxtResp(s string) []byte {
-	return fmt.Appendf(nil, "%s\r\n"+"Content-Type: text/plain\r\n"+"Content-Length: %d\r\n\r\n%s", statusOK, len(s), s)
-}
+var ErrInvalidMethod = errors.New("invalid or unsupported HTTP method")
 
-func sendResponse(conn net.Conn, buf []byte) {
-	_, err := conn.Write(buf)
-	if err != nil {
-		fmt.Println("Error sending a response: ", err.Error())
-		os.Exit(1)
+func parseMethod(s string) (Method, error) {
+	switch strings.ToUpper(s) {
+	case "GET":
+		return GET, nil
+	case "POST":
+		return POST, nil
+	default:
+		return "", ErrInvalidMethod
 	}
 }
 
-func readRequest(conn net.Conn) (reqTarget string, headers map[string]string, err error) {
-	readBuf := make([]byte, maxReadBytes)
-	n, err := conn.Read(readBuf)
-	if err != nil {
-		fmt.Println("Error reading connection: ", err.Error())
-		return "", nil, err
-	}
-	readBuf = readBuf[:n]
-	req := string(readBuf)
-	reqTarget = getReqTarget(req)
-	headers = getHeaders(req)
-	return reqTarget, headers, nil
+type Request struct {
+	reqLine RequestLine
+	headers Headers
+	body    string
 }
 
-func readFileIntoBuf(filename string) []byte {
-	if dirPath == nil {
-		return fmt.Appendf(nil, "%s\r\n\r\n", statusNotFound)
-	}
-	filePath := fmt.Sprintf("%s/%s", *dirPath, filename)
-	_, err := os.Stat(filePath)
-	if err != nil {
-		return fmt.Appendf(nil, "%s\r\n\r\n", statusNotFound)
-	}
-	content, err := os.ReadFile(filePath)
-	if err != nil {
-		return fmt.Appendf(nil, "%s\r\n\r\n", statusNotFound)
-	}
-	return fmt.Appendf(nil, "%s\r\nContent-Type: application/octet-stream\r\nContent-Length: %d\r\n\r\n%s", statusOK, len(content), string(content))
+type RequestLine struct {
+	method  Method
+	target  string
+	version string
 }
 
-func createResponse(reqTarget string, headers map[string]string) (buf []byte) {
-	if !strings.HasPrefix(reqTarget, "/") {
-		buf = fmt.Appendf(nil, "%s\r\n\r\n", statusNotFound)
-	}
-
-	pathParts := strings.Split(reqTarget, "/")[1:]
-	if len(pathParts) >= 2 && pathParts[0] == "echo" {
-		buf = createStrLenPlainTxtResp(pathParts[1])
-	} else if pathParts[0] == "user-agent" {
-		buf = createStrLenPlainTxtResp(headers["User-Agent"])
-	} else if len(pathParts) >= 2 && pathParts[0] == "files" {
-		buf = readFileIntoBuf(pathParts[1])
-	} else {
-		buf = fmt.Appendf(nil, "%s\r\n\r\n", statusOK)
-	}
-	return buf
-}
-
-func handleConn(conn net.Conn) {
-	reqTarget, headers, err := readRequest(conn)
-	if err != nil {
-		return
-	}
-
-	writeBuf := createResponse(reqTarget, headers)
-
-	sendResponse(conn, writeBuf)
-}
+type Headers map[string]string
 
 func main() {
 
@@ -121,5 +70,113 @@ func main() {
 		}
 		go handleConn(conn)
 	}
+}
 
+func handleConn(conn net.Conn) {
+	req, err := readRequest(conn)
+	if err != nil {
+		return
+	}
+
+	writeBuf := createResponse(req)
+
+	sendResponse(conn, writeBuf)
+}
+
+func readRequest(conn net.Conn) (Request, error) {
+	readBuf := make([]byte, maxReadBytes)
+	n, err := conn.Read(readBuf)
+	if err != nil {
+		fmt.Println("Error reading connection: ", err.Error())
+		return Request{}, err
+	}
+	readBuf = readBuf[:n]
+	reqStr := string(readBuf)
+	reqLineStr, headersBodyStr, _ := strings.Cut(reqStr, "\r\n")
+	reqLine, err := getReqLine(reqLineStr)
+	if err != nil {
+		return Request{}, err
+	}
+	headersStr, body, _ := strings.Cut(headersBodyStr, "\r\n\r\n")
+	headers := getHeaders(headersStr)
+	return Request{
+		reqLine: reqLine,
+		headers: headers,
+		body:    body,
+	}, nil
+}
+
+func getReqLine(reqLine string) (RequestLine, error) {
+	reqLineParts := strings.Fields(reqLine)
+	if len(reqLineParts) != 3 {
+		return RequestLine{}, fmt.Errorf("invalid request line")
+	}
+	method, err := parseMethod(reqLineParts[0])
+	if err != nil {
+		return RequestLine{}, err
+	}
+	return RequestLine{
+		method:  method,
+		target:  reqLineParts[1],
+		version: reqLineParts[2],
+	}, nil
+}
+
+func createResponse(req Request) (buf []byte) {
+	switch req.reqLine.method {
+	case GET:
+		if !strings.HasPrefix(req.reqLine.target, "/") {
+			buf = fmt.Appendf(nil, "%s\r\n\r\n", statusNotFound)
+		}
+		pathParts := strings.Split(req.reqLine.target, "/")[1:]
+		if len(pathParts) >= 2 && pathParts[0] == "echo" {
+			buf = createStrLenPlainTxtResp(pathParts[1])
+		} else if pathParts[0] == "user-agent" {
+			buf = createStrLenPlainTxtResp(req.headers["User-Agent"])
+		} else if len(pathParts) >= 2 && pathParts[0] == "files" {
+			buf = readFileIntoBuf(pathParts[1])
+		} else {
+			buf = fmt.Appendf(nil, "%s\r\n\r\n", statusOK)
+		}
+	case POST:
+	}
+	return buf
+}
+
+func sendResponse(conn net.Conn, buf []byte) {
+	_, err := conn.Write(buf)
+	if err != nil {
+		fmt.Println("Error sending a response: ", err.Error())
+		os.Exit(1)
+	}
+}
+
+func getHeaders(headersStr string) Headers {
+	headers := strings.Split(headersStr, "\r\n")
+	headerMap := make(map[string]string)
+	for _, header := range headers {
+		headerArr := strings.Split(header, ":")
+		headerMap[headerArr[0]] = strings.TrimSpace(headerArr[1])
+	}
+	return headerMap
+}
+
+func createStrLenPlainTxtResp(s string) []byte {
+	return fmt.Appendf(nil, "%s\r\n"+"Content-Type: text/plain\r\n"+"Content-Length: %d\r\n\r\n%s", statusOK, len(s), s)
+}
+
+func readFileIntoBuf(filename string) []byte {
+	if dirPath == nil {
+		return fmt.Appendf(nil, "%s\r\n\r\n", statusNotFound)
+	}
+	filePath := fmt.Sprintf("%s/%s", *dirPath, filename)
+	_, err := os.Stat(filePath)
+	if err != nil {
+		return fmt.Appendf(nil, "%s\r\n\r\n", statusNotFound)
+	}
+	content, err := os.ReadFile(filePath)
+	if err != nil {
+		return fmt.Appendf(nil, "%s\r\n\r\n", statusNotFound)
+	}
+	return fmt.Appendf(nil, "%s\r\nContent-Type: application/octet-stream\r\nContent-Length: %d\r\n\r\n%s", statusOK, len(content), string(content))
 }
