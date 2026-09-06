@@ -6,13 +6,17 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"strconv"
 	"strings"
 )
 
 const port = 4221
 const maxReadBytes = 1024
 const statusOK = "HTTP/1.1 200 OK"
+const statusCreated = "HTTP/1.1 201 Created"
 const statusNotFound = "HTTP/1.1 404 Not Found"
+const statusBadRequest = "HTTP/1.1 400 Bad Request"
+const statusInternalServerError = "HTTP/1.1 500 Internal Server Error"
 
 var dirPath *string
 
@@ -123,24 +127,44 @@ func getReqLine(reqLine string) (RequestLine, error) {
 }
 
 func createResponse(req Request) (buf []byte) {
+	pathParts := strings.Split(req.reqLine.target, "/")[1:]
 	switch req.reqLine.method {
 	case GET:
 		if !strings.HasPrefix(req.reqLine.target, "/") {
 			buf = fmt.Appendf(nil, "%s\r\n\r\n", statusNotFound)
 		}
-		pathParts := strings.Split(req.reqLine.target, "/")[1:]
-		if len(pathParts) >= 2 && pathParts[0] == "echo" {
+		if len(pathParts) == 2 && pathParts[0] == "echo" {
 			buf = createStrLenPlainTxtResp(pathParts[1])
 		} else if pathParts[0] == "user-agent" {
 			buf = createStrLenPlainTxtResp(req.headers["User-Agent"])
-		} else if len(pathParts) >= 2 && pathParts[0] == "files" {
+		} else if len(pathParts) == 2 && pathParts[0] == "files" {
 			buf = readFileIntoBuf(pathParts[1])
 		} else {
 			buf = fmt.Appendf(nil, "%s\r\n\r\n", statusOK)
 		}
 	case POST:
+		if len(pathParts) == 2 && pathParts[0] == "files" {
+			buf = writeBufToFile(pathParts[1], req.headers["Content-Length"], req.body)
+		}
 	}
 	return buf
+}
+
+func writeBufToFile(filename string, lenS string, content string) []byte {
+	len, err := strconv.Atoi(lenS)
+	if err != nil {
+		return fmt.Appendf(nil, "%s\r\n\r\n", statusBadRequest)
+	}
+	data := []byte(content[:len])
+	if dirPath == nil {
+		err = os.WriteFile(filename, data, 0644)
+	} else {
+		err = os.WriteFile(*dirPath+filename, data, 0644)
+	}
+	if err != nil {
+		return fmt.Appendf(nil, "%s\r\n\r\n", statusInternalServerError)
+	}
+	return fmt.Appendf(nil, "%s\r\n\r\n", statusCreated)
 }
 
 func sendResponse(conn net.Conn, buf []byte) {
