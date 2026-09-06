@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 )
@@ -17,8 +18,6 @@ const statusCreated = "HTTP/1.1 201 Created"
 const statusNotFound = "HTTP/1.1 404 Not Found"
 const statusBadRequest = "HTTP/1.1 400 Bad Request"
 const statusInternalServerError = "HTTP/1.1 500 Internal Server Error"
-
-var dirPath *string
 
 type Method string
 
@@ -57,8 +56,9 @@ type Headers map[string]string
 
 func main() {
 
-	dirPath = flag.String("directory", ".", "root directory for file requests")
+	dirPathFlag := flag.String("directory", ".", "root directory for file requests")
 	flag.Parse()
+	dirPath := *dirPathFlag
 
 	l, err := net.Listen("tcp", fmt.Sprintf("0.0.0.0:%d", port))
 	if err != nil {
@@ -72,17 +72,19 @@ func main() {
 			fmt.Println("Error accepting connection: ", err.Error())
 			os.Exit(1)
 		}
-		go handleConn(conn)
+		go handleConn(conn, dirPath)
 	}
 }
 
-func handleConn(conn net.Conn) {
+func handleConn(conn net.Conn, dirPath string) {
+	defer conn.Close()
+
 	req, err := readRequest(conn)
 	if err != nil {
 		return
 	}
 
-	writeBuf := createResponse(req)
+	writeBuf := createResponse(req, dirPath)
 
 	sendResponse(conn, writeBuf)
 }
@@ -113,7 +115,7 @@ func readRequest(conn net.Conn) (Request, error) {
 func getReqLine(reqLine string) (RequestLine, error) {
 	reqLineParts := strings.Fields(reqLine)
 	if len(reqLineParts) != 3 {
-		return RequestLine{}, fmt.Errorf("invalid request line")
+		return RequestLine{}, errors.New("invalid request line")
 	}
 	method, err := parseMethod(reqLineParts[0])
 	if err != nil {
@@ -126,52 +128,52 @@ func getReqLine(reqLine string) (RequestLine, error) {
 	}, nil
 }
 
-func createResponse(req Request) (buf []byte) {
+func createResponse(req Request, dirPath string) []byte {
+	var buf []byte
 	pathParts := strings.Split(req.reqLine.target, "/")[1:]
 	switch req.reqLine.method {
 	case GET:
 		if !strings.HasPrefix(req.reqLine.target, "/") {
-			buf = fmt.Appendf(nil, "%s\r\n\r\n", statusNotFound)
+			return statusOnlyResponse(statusNotFound)
 		}
 		if len(pathParts) == 2 && pathParts[0] == "echo" {
 			buf = createStrLenPlainTxtResp(pathParts[1])
 		} else if pathParts[0] == "user-agent" {
 			buf = createStrLenPlainTxtResp(req.headers["User-Agent"])
 		} else if len(pathParts) == 2 && pathParts[0] == "files" {
-			buf = readFileIntoBuf(pathParts[1])
+			buf = readFileIntoBuf(pathParts[1], dirPath)
 		} else {
-			buf = fmt.Appendf(nil, "%s\r\n\r\n", statusOK)
+			buf = statusOnlyResponse(statusOK)
 		}
 	case POST:
 		if len(pathParts) == 2 && pathParts[0] == "files" {
-			buf = writeBufToFile(pathParts[1], req.headers["Content-Length"], req.body)
+			buf = writeBufToFile(pathParts[1], req.headers["Content-Length"], req.body, dirPath)
 		}
 	}
 	return buf
 }
 
-func writeBufToFile(filename string, lenS string, content string) []byte {
-	len, err := strconv.Atoi(lenS)
+func filePath(dirPath string, filename string) string {
+	return filepath.Join(dirPath, filename)
+}
+
+func writeBufToFile(filename string, lenS string, content string, dirPath string) []byte {
+	contentLen, err := strconv.Atoi(lenS)
 	if err != nil {
-		return fmt.Appendf(nil, "%s\r\n\r\n", statusBadRequest)
+		return statusOnlyResponse(statusBadRequest)
 	}
-	data := []byte(content[:len])
-	if dirPath == nil {
-		err = os.WriteFile(filename, data, 0644)
-	} else {
-		err = os.WriteFile(*dirPath+filename, data, 0644)
-	}
+	data := []byte(content[:contentLen])
+	err = os.WriteFile(filePath(dirPath, filename), data, 0644)
 	if err != nil {
-		return fmt.Appendf(nil, "%s\r\n\r\n", statusInternalServerError)
+		return statusOnlyResponse(statusInternalServerError)
 	}
-	return fmt.Appendf(nil, "%s\r\n\r\n", statusCreated)
+	return statusOnlyResponse(statusCreated)
 }
 
 func sendResponse(conn net.Conn, buf []byte) {
 	_, err := conn.Write(buf)
 	if err != nil {
 		fmt.Println("Error sending a response: ", err.Error())
-		os.Exit(1)
 	}
 }
 
@@ -179,28 +181,32 @@ func getHeaders(headersStr string) Headers {
 	headers := strings.Split(headersStr, "\r\n")
 	headerMap := make(map[string]string)
 	for _, header := range headers {
-		headerArr := strings.Split(header, ":")
-		headerMap[headerArr[0]] = strings.TrimSpace(headerArr[1])
+		name, value, found := strings.Cut(header, ":")
+		if !found {
+			continue
+		}
+		headerMap[name] = strings.TrimSpace(value)
 	}
 	return headerMap
+}
+
+func statusOnlyResponse(status string) []byte {
+	return fmt.Appendf(nil, "%s\r\n\r\n", status)
 }
 
 func createStrLenPlainTxtResp(s string) []byte {
 	return fmt.Appendf(nil, "%s\r\n"+"Content-Type: text/plain\r\n"+"Content-Length: %d\r\n\r\n%s", statusOK, len(s), s)
 }
 
-func readFileIntoBuf(filename string) []byte {
-	if dirPath == nil {
-		return fmt.Appendf(nil, "%s\r\n\r\n", statusNotFound)
-	}
-	filePath := fmt.Sprintf("%s/%s", *dirPath, filename)
-	_, err := os.Stat(filePath)
+func readFileIntoBuf(filename string, dirPath string) []byte {
+	path := filePath(dirPath, filename)
+	_, err := os.Stat(path)
 	if err != nil {
-		return fmt.Appendf(nil, "%s\r\n\r\n", statusNotFound)
+		return statusOnlyResponse(statusNotFound)
 	}
-	content, err := os.ReadFile(filePath)
+	content, err := os.ReadFile(path)
 	if err != nil {
-		return fmt.Appendf(nil, "%s\r\n\r\n", statusNotFound)
+		return statusOnlyResponse(statusNotFound)
 	}
 	return fmt.Appendf(nil, "%s\r\nContent-Type: application/octet-stream\r\nContent-Length: %d\r\n\r\n%s", statusOK, len(content), string(content))
 }
