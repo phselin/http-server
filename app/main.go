@@ -1,6 +1,8 @@
 package main
 
 import (
+	"bytes"
+	"compress/gzip"
 	"errors"
 	"flag"
 	"fmt"
@@ -214,6 +216,12 @@ func checkSchemeSupport(schemes string, s string) bool {
 }
 
 func createStrLenPlainTxtResp(s string, encodingHeader string) []byte {
+	if encodingHeader != "" {
+		comp, err := gzipCompression([]byte(s))
+		if err == nil {
+			s = string(comp)
+		}
+	}
 	return fmt.Appendf(nil, "%s\r\n%sContent-Type: text/plain\r\nContent-Length: %d\r\n\r\n%s", statusOK, encodingHeader, len(s), s)
 }
 
@@ -227,5 +235,24 @@ func readFileIntoBuf(filename string, dirPath string, encodingHeader string) []b
 	if err != nil {
 		return statusOnlyResponse(statusNotFound)
 	}
+	if encodingHeader != "" {
+		comp, err := gzipCompression(content)
+		if err == nil {
+			content = comp
+		}
+	}
 	return fmt.Appendf(nil, "%s\r\n%sContent-Type: application/octet-stream\r\nContent-Length: %d\r\n\r\n%s", statusOK, encodingHeader, len(content), string(content))
+}
+
+func gzipCompression(b []byte) ([]byte, error) {
+	var dstBuf bytes.Buffer
+	gzipWriter := gzip.NewWriter(&dstBuf)
+	if _, err := gzipWriter.Write(b); err != nil {
+		gzipWriter.Close()
+		return nil, err
+	}
+	if err := gzipWriter.Close(); err != nil {
+		return nil, err
+	}
+	return dstBuf.Bytes(), nil
 }
