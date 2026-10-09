@@ -131,17 +131,18 @@ func getReqLine(reqLine string) (RequestLine, error) {
 func createResponse(req Request, dirPath string) []byte {
 	var buf []byte
 	pathParts := strings.Split(req.reqLine.target, "/")[1:]
+	scheme, compress := checkCompression(req.headers)
 	switch req.reqLine.method {
 	case GET:
 		if !strings.HasPrefix(req.reqLine.target, "/") {
 			return statusOnlyResponse(statusNotFound)
 		}
 		if len(pathParts) == 2 && pathParts[0] == "echo" {
-			buf = createStrLenPlainTxtResp(pathParts[1])
+			buf = createStrLenPlainTxtResp(pathParts[1], compress, scheme)
 		} else if pathParts[0] == "user-agent" {
-			buf = createStrLenPlainTxtResp(req.headers["User-Agent"])
+			buf = createStrLenPlainTxtResp(req.headers["User-Agent"], compress, scheme)
 		} else if len(pathParts) == 2 && pathParts[0] == "files" {
-			buf = readFileIntoBuf(pathParts[1], dirPath)
+			buf = readFileIntoBuf(pathParts[1], dirPath, compress, scheme)
 		} else {
 			buf = statusOnlyResponse(statusOK)
 		}
@@ -151,6 +152,11 @@ func createResponse(req Request, dirPath string) []byte {
 		}
 	}
 	return buf
+}
+
+func checkCompression(headers Headers) (scheme string, ok bool) {
+	scheme, ok = headers["Accept-Encoding"]
+	return
 }
 
 func filePath(dirPath string, filename string) string {
@@ -194,11 +200,15 @@ func statusOnlyResponse(status string) []byte {
 	return fmt.Appendf(nil, "%s\r\n\r\n", status)
 }
 
-func createStrLenPlainTxtResp(s string) []byte {
-	return fmt.Appendf(nil, "%s\r\n"+"Content-Type: text/plain\r\n"+"Content-Length: %d\r\n\r\n%s", statusOK, len(s), s)
+func createStrLenPlainTxtResp(s string, compress bool, scheme string) []byte {
+	encodingHeader := ""
+	if compress && scheme == "gzip" {
+		encodingHeader = fmt.Sprintf("Content-Encoding: %s\r\n", scheme)
+	}
+	return fmt.Appendf(nil, "%s\r\n%sContent-Type: text/plain\r\nContent-Length: %d\r\n\r\n%s", statusOK, encodingHeader, len(s), s)
 }
 
-func readFileIntoBuf(filename string, dirPath string) []byte {
+func readFileIntoBuf(filename string, dirPath string, compress bool, scheme string) []byte {
 	path := filePath(dirPath, filename)
 	_, err := os.Stat(path)
 	if err != nil {
@@ -208,5 +218,9 @@ func readFileIntoBuf(filename string, dirPath string) []byte {
 	if err != nil {
 		return statusOnlyResponse(statusNotFound)
 	}
-	return fmt.Appendf(nil, "%s\r\nContent-Type: application/octet-stream\r\nContent-Length: %d\r\n\r\n%s", statusOK, len(content), string(content))
+	encodingHeader := ""
+	if compress && scheme == "gzip" {
+		encodingHeader = fmt.Sprintf("Content-Encoding: %s\r\n", scheme)
+	}
+	return fmt.Appendf(nil, "%s\r\n%sContent-Type: application/octet-stream\r\nContent-Length: %d\r\n\r\n%s", statusOK, encodingHeader, len(content), string(content))
 }
